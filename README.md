@@ -1,4 +1,4 @@
-# FastAPI Model Server - Öğrenme Projesi 🚀
+# FastAPI Model Server
 
 ## 📖 Proje Hakkında
 
