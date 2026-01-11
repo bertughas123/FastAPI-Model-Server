@@ -4,15 +4,6 @@
 
 Bu proje, **FastAPI** kullanarak **Machine Learning model serving** yapan, performans metriklerini toplayan ve **Gemini AI** ile analiz eden production-ready bir backend sistemidir.
 
-## 🎯 Öğrenme Hedefleri
-
-4 aşamalı müfredat ile şunları öğreneceksiniz:
-
-1. **Aşama 1:** FastAPI temelleri ve asenkron programlama → [ASAMA_1_TEMEL_API.md](ASAMA_1_TEMEL_API.md)
-2. **Aşama 2:** Pydantic ile veri doğrulama ve metrik sistemi → [ASAMA_2_SEMA_DOGRULAMA.md](ASAMA_2_SEMA_DOGRULAMA.md)
-3. **Aşama 3:** Gemini API ile akıllı performans analizi → [ASAMA_3_GEMINI_ANALIZ.md](ASAMA_3_GEMINI_ANALIZ.md)
-4. **Aşama 4:** REST API tasarımı ve frontend entegrasyonu → [ASAMA_4_MONITORING_RAPORLAMA.md](ASAMA_4_MONITORING_RAPORLAMA.md)
-
 ## 🏗️ Proje Yapısı
 
 ```
@@ -90,21 +81,6 @@ curl -X POST http://localhost:8000/api/v1/predict \
 curl http://localhost:8000/api/v1/dashboard?time_window_minutes=60 | jq
 ```
 
-## 📚 Öğrenme Yolu
-
-### Başlangıç: Aşama 1
-[ASAMA_1_TEMEL_API.md](ASAMA_1_TEMEL_API.md) dosyasını açın ve:
-1. Teori bölümünü okuyun
-2. Kod örneklerini çalıştırın
-3. Challenge görevlerini tamamlayın
-4. Bir sonraki aşamaya geçin
-
-**Her aşamada:**
-- ✅ Önce teoriyi anlayın
-- ✅ Kodu çalıştırıp test edin
-- ✅ En az 2 challenge'ı tamamlayın
-- ✅ Kendi başınıza kod yazın
-
 ## 🛠️ Teknoloji Stack
 
 | Katman | Teknoloji | Neden? |
@@ -126,19 +102,6 @@ curl http://localhost:8000/api/v1/dashboard?time_window_minutes=60 | jq
 - `POST /analyze/performance` - Gemini AI analizi
 - `GET /api/v1/reports/daily` - Günlük rapor
 - `GET /api/v1/reports/timeseries` - Zaman serisi verileri
-
-## 🎓 Challenge Görevleri
-
-Her aşamada 3 zorluk seviyesinde görevler var:
-- 🟢 **Kolay:** Temel kavramları pekiştirme
-- 🟡 **Orta:** Gerçek dünya problemleri
-- 🔴 **Zor:** İleri seviye özellikler
-
-**Örnek Görevler:**
-- Yeni endpoint'ler ekleyin
-- Custom validator'lar yazın
-- Gemini prompt'larını optimize edin
-- React dashboard entegrasyonu yapın
 
 ## 🐛 Sorun Giderme
 
@@ -168,28 +131,3 @@ type .env  # Windows
 - [Gemini API Dokümantasyon](https://ai.google.dev/docs)
 - [Python Async/Await Rehberi](https://realpython.com/async-io-python/)
 
-## 🤝 Katkıda Bulunma
-
-Bu bir öğrenme projesidir. Kendi branch'inizi oluşturup deneyler yapabilirsiniz:
-
-```bash
-git checkout -b feature/benim-deneyim
-# Değişikliklerinizi yapın
-git commit -m "Yeni özellik: X"
-```
-
-## 📝 Lisans
-
-Bu proje eğitim amaçlıdır ve özgürce kullanılabilir.
-
-## 🎉 Başarı Kriterleri
-
-Bu müfredatı tamamladığınızda:
-
-✅ FastAPI ile RESTful API geliştirebileceksiniz  
-✅ Pydantic ile güvenli veri doğrulama yapabileceksiniz  
-✅ LLM API'lerini entegre edebileceksiniz  
-✅ Production-ready backend sistemleri tasarlayabileceksiniz  
-✅ Frontend ile sorunsuz entegrasyon yapabileceksiniz
-
-**Haydi başlayalım!** 🚀 [Aşama 1'e git →](ASAMA_1_TEMEL_API.md)
