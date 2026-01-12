@@ -2,10 +2,11 @@
 FastAPI Model Server - Ana Uygulama
 Aşama 1: Temel API Mimarisi
 """
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, status, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from typing import Dict, Any
+from collections import deque, defaultdict
 import time
 from datetime import datetime
 from models.dummy_model import ml_model
@@ -68,6 +69,70 @@ class HealthResponse(BaseModel):
 
 # Uygulama başlangıç zamanı (uptime hesabı için)
 app_start_time = time.time()
+
+
+# ============================================================================
+# RATE LIMITING SİSTEMİ
+# ============================================================================
+
+class RateLimiter:
+    """
+    IP tabanlı basit rate limiter
+    
+    Nasıl Çalışır:
+    1. Her IP için son isteklerin timestamp'lerini deque'da tutar
+    2. Yeni istek geldiğinde eski timestamp'leri temizler (time_window dışındakiler)
+    3. Limit aşılmışsa False döner, değilse yeni timestamp ekler ve True döner
+    
+    Neden deque?
+    - deque (double-ended queue) baştan ve sondan O(1) ekleme/silme yapar
+    - Liste kullanırsak pop(0) işlemi O(n) olur (yavaş)
+    - Eski timestamp'leri soldan silmek çok hızlı: popleft()
+    """
+    
+    def __init__(self, max_requests: int = 10, time_window: int = 60):
+        """
+        Args:
+            max_requests: Zaman penceresi içinde maksimum istek sayısı
+            time_window: Zaman penceresi (saniye)
+        """
+        self.max_requests = max_requests
+        self.time_window = time_window
+        
+        # Her IP için timestamp listesi
+        # defaultdict: Yeni IP geldiğinde otomatik boş deque oluşturur
+        self.requests: Dict[str, deque] = defaultdict(deque)
+    
+    def is_allowed(self, client_ip: str) -> bool:
+        """
+        İsteğin izin verilip verilmeyeceğini kontrol et
+        
+        Args:
+            client_ip: İstemci IP adresi
+            
+        Returns:
+            True: İstek kabul edilebilir
+            False: Rate limit aşıldı
+        """
+        current_time = time.time()
+        request_times = self.requests[client_ip]
+        
+        # Eski timestamp'leri temizle (time_window dışındakiler)
+        while request_times and request_times[0] < current_time - self.time_window:
+            request_times.popleft()
+        
+        # Limit kontrolü
+        if len(request_times) >= self.max_requests:
+            return False  # Limit aşıldı
+        
+        # Yeni timestamp ekle
+        request_times.append(current_time)
+        return True
+
+
+# Global rate limiter instance
+# Dakikada maksimum 10 istek (60 saniyede 10)
+rate_limiter = RateLimiter(max_requests=10, time_window=60)
 
 
 # ============================================================================
@@ -151,28 +216,38 @@ async def health_check():
 @app.post(
     "/predict",
     response_model=PredictResponse,
-    summary="Tahmin Yap",
-    description="Gelen metni analiz eder ve sentiment tahmini yapar",
+    summary="Tahmin Yap (Rate Limited)",
+    description="Gelen metni analiz eder ve sentiment tahmini yapar. Dakikada maksimum 10 istek.",
     status_code=status.HTTP_200_OK
 )
-async def predict(request: PredictRequest):
+async def predict(request: PredictRequest, http_request: Request):
     """
-    ML model tahmini endpoint'i
+    ML model tahmini endpoint'i (Rate Limited)
     
     Args:
         request: PredictRequest şemasına uygun istek body'si
+        http_request: FastAPI Request objesi (IP adresi için)
         
     Returns:
         PredictResponse: Tahmin sonuçları
         
     Raises:
-        HTTPException: Model yüklü değilse 503 hatası döner
-    
-    ASYNC KULLANIM NEDENİ:
-    - Model inference sırasında CPU yoğun işlem yapılırken
-    - Diğer istekler beklemek zorunda kalmaz
-    - Gerçek production'da bu await model.predict_async() olurdu
+        HTTPException: 
+            - 429: Rate limit aşıldı (dakikada 10 istekten fazla)
+            - 503: Model yüklü değil
+            - 500: Tahmin hatası
     """
+    
+    # Rate limit kontrolü
+    client_ip = http_request.client.host
+    
+    if not rate_limiter.is_allowed(client_ip):
+        # Limit aşıldı - 429 hatası fırlat
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Rate limit aşıldı. Dakikada maksimum {rate_limiter.max_requests} istek yapabilirsiniz."
+        )
+    
     # Model durumu kontrolü
     if not ml_model.is_loaded:
         raise HTTPException(
@@ -185,7 +260,7 @@ async def predict(request: PredictRequest):
         # NOT: Gerçek async model için: await model.predict_async(request.text)
         prediction = ml_model.predict(request.text)
         
-        # Yanıtı oluştur
+        # Yanıtı oluştur ve döndür
         return PredictResponse(
             sentiment=prediction["sentiment"],
             confidence=prediction["confidence"],
