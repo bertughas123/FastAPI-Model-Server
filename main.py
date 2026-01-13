@@ -1,66 +1,34 @@
 """
 FastAPI Model Server - Ana Uygulama
-Aşama 1: Temel API Mimarisi
+Aşama 2: Şema ve Veri Doğrulama + Metrik Sistemi
 """
 from fastapi import FastAPI, HTTPException, status, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
 from typing import Dict, Any
 from collections import deque, defaultdict
 import time
 from datetime import datetime
 from models.dummy_model import ml_model
 
+# Schemas import
+from schemas.requests import PredictRequest, MetricsQueryRequest
+from schemas.responses import PredictResponse, HealthResponse
+from schemas.metrics import AggregatedMetrics, MetricThresholds
+
+# Services import
+from services.metrics_tracker import metrics_tracker
+
 # FastAPI uygulaması oluştur
 app = FastAPI(
     title="FastAPI Model Server",
-    description="ML Model Serving ve Performans İzleme API'si",
-    version="1.0.0",
+    description="ML Model Serving ve Performans İzleme API'si (Aşama 2: Metrikler)",
+    version="2.0.0",
     docs_url="/docs",  # Swagger UI: http://localhost:8000/docs
     redoc_url="/redoc"  # ReDoc: http://localhost:8000/redoc
 )
 
 
-# ============================================================================
-# PYDANTIC MODELLER (Input/Output Şemaları)
-# ============================================================================
 
-class PredictRequest(BaseModel):
-    """Tahmin isteği için veri modeli"""
-    text: str = Field(
-        ...,  # ... = zorunlu alan
-        min_length=1,
-        max_length=1000,
-        description="Analiz edilecek metin",
-        examples=["Bu ürün gerçekten harika!"]
-    )
-    
-    class Config:
-        # Pydantic v2 için JSON schema örnekleri
-        json_schema_extra = {
-            "example": {
-                "text": "Bu ürün gerçekten harika!"
-            }
-        }
-
-
-class PredictResponse(BaseModel):
-    """Tahmin yanıtı için veri modeli"""
-    sentiment: str = Field(description="Tespit edilen duygu (positive/negative/neutral)")
-    confidence: float = Field(description="Tahmin güven skoru (0-1 arası)")
-    inference_time_ms: float = Field(description="Model çıkarım süresi (milisaniye)")
-    timestamp: str = Field(description="İstek zamanı (ISO 8601)")
-    model_version: str = Field(description="Kullanılan model versiyonu")
-
-
-class HealthResponse(BaseModel):
-    """Sağlık kontrolü yanıtı"""
-    status: str = Field(description="Servis durumu")
-    model_loaded: bool = Field(description="Model yüklenme durumu")
-    model_name: str = Field(description="Model adı")
-    model_version: str = Field(description="Model versiyonu")
-    timestamp: str = Field(description="Kontrol zamanı")
-    uptime_seconds: float = Field(description="Servis çalışma süresi (saniye)")
 
 
 # ============================================================================
@@ -260,14 +228,26 @@ async def predict(request: PredictRequest, http_request: Request):
         # NOT: Gerçek async model için: await model.predict_async(request.text)
         prediction = ml_model.predict(request.text)
         
-        # Yanıtı oluştur ve döndür
-        return PredictResponse(
+        # Metrik kaydet
+        metric = metrics_tracker.add_metric(
+            sentiment=prediction["sentiment"],
+            confidence=prediction["confidence"],
+            inference_time_ms=prediction["inference_time_ms"],
+            input_length=len(request.text),
+            model_version=ml_model.version
+        )
+        
+        # Yanıtı oluştur
+        response = PredictResponse(
             sentiment=prediction["sentiment"],
             confidence=prediction["confidence"],
             inference_time_ms=prediction["inference_time_ms"],
             timestamp=datetime.utcnow().isoformat() + "Z",
-            model_version=ml_model.version
+            model_version=ml_model.version,
+            metric=metric if request.include_metrics else None
         )
+        
+        return response
         
     except Exception as e:
         # Hata durumunda 500 Internal Server Error
@@ -275,6 +255,65 @@ async def predict(request: PredictRequest, http_request: Request):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Tahmin sırasında hata oluştu: {str(e)}"
         )
+
+
+# ============================================================================
+# METRİK ENDPOİNTLERİ (Aşama 2)
+# ============================================================================
+
+@app.post(
+    "/metrics/aggregated",
+    response_model=AggregatedMetrics,
+    tags=["Metrics"],
+    summary="Toplam Metrikleri Getir"
+)
+async def get_aggregated_metrics(query: MetricsQueryRequest):
+    """
+    Belirli zaman aralığındaki toplam metrikleri döndür
+    
+    Args:
+        query: Zaman penceresi (dakika cinsinden)
+        
+    Returns:
+        Toplanan metrikler (ortalamalar, dağılımlar, vb.)
+    """
+    return metrics_tracker.get_aggregated_metrics(
+        time_window_minutes=query.time_window_minutes
+    )
+
+
+@app.put(
+    "/metrics/thresholds",
+    response_model=MetricThresholds,
+    tags=["Metrics"],
+    summary="Eşik Değerlerini Güncelle"
+)
+async def update_thresholds(thresholds: MetricThresholds):
+    """
+    Metrik eşik değerlerini güncelle
+    
+    Args:
+        thresholds: Yeni eşik değerleri
+        
+    Returns:
+        Güncellenen eşik değerleri
+    """
+    metrics_tracker.update_thresholds(thresholds)
+    return thresholds
+
+
+@app.get(
+    "/metrics/count",
+    tags=["Metrics"],
+    summary="Toplam Metrik Sayısı"
+)
+async def get_metrics_count():
+    """Toplam kaydedilmiş metrik sayısını döndür"""
+    return {
+        "total_metrics": len(metrics_tracker.metrics),
+        "description": "Uygulama başlatıldığından beri kaydedilen toplam tahmin sayısı"
+    }
+
 
 
 # ============================================================================
