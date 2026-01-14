@@ -1,6 +1,6 @@
 """
 FastAPI Model Server - Ana Uygulama
-Aşama 2: Şema ve Veri Doğrulama + Metrik Sistemi
+Aşama 3: Gemini API ile Akıllı Analiz
 """
 from fastapi import FastAPI, HTTPException, status, Request
 from fastapi.responses import JSONResponse
@@ -13,16 +13,17 @@ from models.dummy_model import ml_model
 # Schemas import
 from schemas.requests import PredictRequest, MetricsQueryRequest
 from schemas.responses import PredictResponse, HealthResponse
-from schemas.metrics import AggregatedMetrics, MetricThresholds
+from schemas.metrics import AggregatedMetrics, MetricThresholds, GeminiAnalysisReport
 
 # Services import
 from services.metrics_tracker import metrics_tracker
+from services.gemini_analyzer import gemini_analyzer
 
 # FastAPI uygulaması oluştur
 app = FastAPI(
     title="FastAPI Model Server",
-    description="ML Model Serving ve Performans İzleme API'si (Aşama 2: Metrikler)",
-    version="2.0.0",
+    description="ML Model Serving ve Performans İzleme API'si (Aşama 3: Gemini AI)",
+    version="3.0.0",
     docs_url="/docs",  # Swagger UI: http://localhost:8000/docs
     redoc_url="/redoc"  # ReDoc: http://localhost:8000/redoc
 )
@@ -46,16 +47,6 @@ app_start_time = time.time()
 class RateLimiter:
     """
     IP tabanlı basit rate limiter
-    
-    Nasıl Çalışır:
-    1. Her IP için son isteklerin timestamp'lerini deque'da tutar
-    2. Yeni istek geldiğinde eski timestamp'leri temizler (time_window dışındakiler)
-    3. Limit aşılmışsa False döner, değilse yeni timestamp ekler ve True döner
-    
-    Neden deque?
-    - deque (double-ended queue) baştan ve sondan O(1) ekleme/silme yapar
-    - Liste kullanırsak pop(0) işlemi O(n) olur (yavaş)
-    - Eski timestamp'leri soldan silmek çok hızlı: popleft()
     """
     
     def __init__(self, max_requests: int = 10, time_window: int = 60):
@@ -313,6 +304,58 @@ async def get_metrics_count():
         "total_metrics": len(metrics_tracker.metrics),
         "description": "Uygulama başlatıldığından beri kaydedilen toplam tahmin sayısı"
     }
+
+
+# ============================================================================
+# GEMİNİ AI ANALİZ ENDPOİNTİ (Aşama 3)
+# ============================================================================
+
+@app.post(
+    "/analyze/performance",
+    response_model=GeminiAnalysisReport,
+    tags=["AI Analysis"],
+    summary="Gemini ile Performans Analizi"
+)
+async def analyze_performance(query: MetricsQueryRequest):
+    """
+    Gemini AI kullanarak performans metriklerini analiz et
+    
+    İki zaman penceresi karşılaştırılır:
+    - Güncel: Son X dakika
+    - Önceki: X*2 ile X dakika arası
+    
+    Args:
+        query: Zaman penceresi (dakika cinsinden)
+        
+    Returns:
+        Gemini'nin oluşturduğu analiz raporu
+        
+    Raises:
+        HTTPException: Analiz hatası durumunda
+    """
+    # Güncel metrikler
+    current_metrics = metrics_tracker.get_aggregated_metrics(
+        time_window_minutes=query.time_window_minutes
+    )
+    
+    # Önceki dönem metrikleri (karşılaştırma için)
+    # Örn: Son 60dk vs önceki 60dk
+    previous_metrics = metrics_tracker.get_aggregated_metrics(
+        time_window_minutes=query.time_window_minutes * 2
+    )
+    
+    # Gemini ile analiz et
+    try:
+        report = gemini_analyzer.analyze_performance(
+            current_metrics=current_metrics,
+            previous_metrics=previous_metrics
+        )
+        return report
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Analiz hatası: {str(e)}"
+        )
 
 
 
