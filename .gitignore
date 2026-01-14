@@ -208,7 +208,6 @@ __marimo__/
 
 # Project-specific files
 # Curriculum/Stage documentation files
-ASAMA_*.md
 
 # Environment example file
 env.example
