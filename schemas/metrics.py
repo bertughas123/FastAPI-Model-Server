@@ -238,3 +238,97 @@ class MetricThresholds(BaseModel):
                 "max_inference_time_critical_ms": 500.0
             }
         }
+
+
+# ============================================================================
+# GEMİNİ ANALİZ ŞEMALARı (Aşama 3)
+# ============================================================================
+
+class PerformanceIssue(BaseModel):
+    """Tespit edilen performans sorunu"""
+    
+    issue_type: str = Field(
+        description="Sorun tipi (low_confidence, high_latency, data_drift, vb.)"
+    )
+    
+    severity: str = Field(
+        description="Önem derecesi (low, medium, high, critical)"
+    )
+    
+    description: str = Field(
+        description="Sorun açıklaması"
+    )
+    
+    detected_at: datetime = Field(
+        default_factory=datetime.utcnow,
+        description="Tespit zamanı"
+    )
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "issue_type": "low_confidence",
+                "severity": "high",
+                "description": "Ortalama güven skoru 0.45'e düştü (normal: 0.78)",
+                "detected_at": "2024-01-10T10:30:00Z"
+            }
+        }
+
+
+class GeminiAnalysisReport(BaseModel):
+    """Gemini'nin oluşturduğu analiz raporu"""
+    
+    summary: str = Field(
+        description="Genel analiz özeti (2-3 cümle)"
+    )
+    
+    identified_issues: list[PerformanceIssue] = Field(
+        default_factory=list,
+        description="Tespit edilen sorunlar listesi"
+    )
+    
+    recommendations: list[str] = Field(
+        description="Öneriler listesi"
+    )
+    
+    root_cause_hypothesis: str = Field(
+        description="Kök neden hipotezi"
+    )
+    
+    confidence_score: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Gemini'nin analizine olan güveni (0-1)"
+    )
+    
+    generated_at: datetime = Field(
+        default_factory=datetime.utcnow,
+        description="Rapor oluşturulma zamanı"
+    )
+    
+    metrics_analyzed: AggregatedMetrics = Field(
+        description="Analiz edilen metrikler"
+    )
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "summary": "Son 60 dakikada ortalama güven skoru %23 düştü ve gecikme 2.8x arttı.",
+                "identified_issues": [
+                    {
+                        "issue_type": "low_confidence",
+                        "severity": "high",
+                        "description": "Ortalama güven skoru 0.45'e düştü (normal: 0.78)",
+                        "detected_at": "2024-01-10T10:30:00Z"
+                    }
+                ],
+                "recommendations": [
+                    "Yeni gelen veri dağılımını inceleyin",
+                    "Model yeniden eğitimi düşünün",
+                    "A/B test ile eski model versiyonunu deneyin"
+                ],
+                "root_cause_hypothesis": "Yeni veri kaynağı modelin eğitim dağılımından farklı özelliklere sahip olabilir.",
+                "confidence_score": 0.78,
+                "generated_at": "2024-01-10T10:30:00Z"
+            }
+        }
