@@ -37,7 +37,7 @@ class GeminiAnalyzer:
         genai.configure(api_key=api_key)
         
         # Model konfigürasyonu
-        self.model_name = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+        self.model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
         self.temperature = float(os.getenv("GEMINI_TEMPERATURE", "0.3"))
         self.max_tokens = int(os.getenv("GEMINI_MAX_TOKENS", "1024"))
         
@@ -51,7 +51,7 @@ class GeminiAnalyzer:
         )
         
         # Rate Limiting: Dakikada maksimum 5 istek
-        self.max_requests_per_minute = 5
+        self.max_requests_per_minute = 10
         self.request_times: deque = deque(maxlen=self.max_requests_per_minute)
         
         # Basit Cache: Son analiz sonuçlarını 5 dakika sakla
