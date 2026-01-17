@@ -209,8 +209,6 @@ __marimo__/
 # Project-specific files
 # Curriculum/Stage documentation files
 
-# Environment example file
-env.example
+.env
 
 # Project README
-README.md
