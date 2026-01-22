@@ -1,12 +1,10 @@
 """
 Async PostgreSQL Tabanlı Metrik Tracker
 Dict/List yapısından veritabanına dönüşüm
-
-NOT: Threshold metodları ayrı aşamada (4B) implement edilecek.
 """
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
-from database.models import PredictionMetricDB, ModelVersionDB, SentimentTypeDB
+from database.models import PredictionMetricDB, ModelVersionDB, SentimentTypeDB, MetricThresholdsDB
 from schemas.metrics import AggregatedMetrics, MetricStatus, SentimentType
 from datetime import datetime, timedelta
 import uuid
@@ -93,6 +91,14 @@ class MetricsTrackerDB:
         # Sentiment dağılımı
         sentiment_dist = await self._get_sentiment_distribution(window_start)
         
+        # Threshold'ları al ve status belirle
+        thresholds = await self.get_thresholds()
+        status = self._determine_status(
+            row.avg_conf or 0.0,
+            row.avg_time or 0.0,
+            thresholds
+        )
+        
         return AggregatedMetrics(
             total_predictions=row.total or 0,
             average_confidence=round(row.avg_conf or 0.0, 2),
@@ -101,7 +107,7 @@ class MetricsTrackerDB:
             max_inference_time_ms=round(row.max_time or 0.0, 2),
             p95_inference_time_ms=None,  # Challenge olarak eklenebilir
             sentiment_distribution=sentiment_dist,
-            status=MetricStatus.NORMAL,  # Threshold aşamasında implement edilecek
+            status=status,
             time_window_start=window_start,
             time_window_end=now
         )
@@ -142,6 +148,60 @@ class MetricsTrackerDB:
             dist[pydantic_sentiment] = row.count
         
         return dist
+    
+    # ════════════════════════════════════════════════════════════════════
+    # THRESHOLD YÖNETİMİ (Aşama 4B)
+    # ════════════════════════════════════════════════════════════════════
+    
+    async def get_thresholds(self, profile_name: str = "default") -> MetricThresholdsDB:
+        """Eşik değerlerini veritabanından al"""
+        stmt = select(MetricThresholdsDB).where(
+            MetricThresholdsDB.name == profile_name
+        )
+        result = await self.session.execute(stmt)
+        thresholds = result.scalar_one_or_none()
+        
+        if not thresholds:
+            # Varsayılan değerlerle oluştur
+            thresholds = MetricThresholdsDB(name=profile_name)
+            self.session.add(thresholds)
+            await self.session.flush()
+        
+        return thresholds
+    
+    async def update_thresholds(
+        self, 
+        new_thresholds: dict,
+        profile_name: str = "default"
+    ) -> MetricThresholdsDB:
+        """Eşik değerlerini güncelle"""
+        thresholds = await self.get_thresholds(profile_name)
+        
+        for key, value in new_thresholds.items():
+            if hasattr(thresholds, key):
+                setattr(thresholds, key, value)
+        
+        thresholds.updated_at = datetime.utcnow()
+        await self.session.flush()
+        
+        return thresholds
+    
+    def _determine_status(
+        self,
+        avg_confidence: float,
+        avg_inference_time: float,
+        thresholds: MetricThresholdsDB
+    ) -> MetricStatus:
+        """Metrik durumunu belirle"""
+        if (avg_confidence <= thresholds.min_confidence_critical or
+            avg_inference_time >= thresholds.max_inference_time_critical_ms):
+            return MetricStatus.CRITICAL
+        
+        if (avg_confidence <= thresholds.min_confidence_warning or
+            avg_inference_time >= thresholds.max_inference_time_warning_ms):
+            return MetricStatus.WARNING
+        
+        return MetricStatus.NORMAL
     
     def _empty_aggregated_metrics(
         self, 
