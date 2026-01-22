@@ -165,7 +165,7 @@ class MetricsTrackerDB:
             # Varsayılan değerlerle oluştur
             thresholds = MetricThresholdsDB(name=profile_name)
             self.session.add(thresholds)
-            await self.session.flush()
+            await self.session.flush() # to prevent the connection from closing :)
         
         return thresholds
     
