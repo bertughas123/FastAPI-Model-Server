@@ -70,13 +70,16 @@ class MetricsTrackerDB:
         now = datetime.utcnow()
         window_start = now - timedelta(minutes=time_window_minutes)
         
-        # Aggregate sorgusu
+        # Aggregate sorgusu (P95 dahil)
         stmt = select(
             func.count(PredictionMetricDB.id).label("total"),
             func.avg(PredictionMetricDB.confidence).label("avg_conf"),
             func.avg(PredictionMetricDB.inference_time_ms).label("avg_time"),
             func.min(PredictionMetricDB.inference_time_ms).label("min_time"),
             func.max(PredictionMetricDB.inference_time_ms).label("max_time"),
+            func.percentile_cont(0.95).within_group(
+                PredictionMetricDB.inference_time_ms
+            ).label("p95_time"),
         ).where(
             PredictionMetricDB.timestamp >= window_start
         )
@@ -105,7 +108,7 @@ class MetricsTrackerDB:
             average_inference_time_ms=round(row.avg_time or 0.0, 2),
             min_inference_time_ms=round(row.min_time or 0.0, 2),
             max_inference_time_ms=round(row.max_time or 0.0, 2),
-            p95_inference_time_ms=None,  # Challenge olarak eklenebilir
+            p95_inference_time_ms=round(row.p95_time, 2) if row.p95_time else None,
             sentiment_distribution=sentiment_dist,
             status=status,
             time_window_start=window_start,
