@@ -71,14 +71,11 @@ async def update_thresholds(
     "/metrics/count",
     summary="Toplam Metrik Sayısı"
 )
-async def get_metrics_count(db: AsyncSession = Depends(get_db)):
+async def get_metrics_count(
+    metrics_tracker: MetricsTrackerDB = Depends(get_metrics_tracker)
+):
     """Toplam kaydedilmiş metrik sayısını döndür (Async DB)"""
-    from sqlalchemy import select, func
-    from database.models import PredictionMetricDB
-    
-    stmt = select(func.count()).select_from(PredictionMetricDB)
-    result = await db.execute(stmt)
-    total = result.scalar() or 0
+    total = await metrics_tracker.get_total_count()
     
     return {
         "total_metrics": total,
