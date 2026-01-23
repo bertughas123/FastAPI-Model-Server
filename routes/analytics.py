@@ -1,15 +1,22 @@
 """
-Analiz ve Metrik Endpoint'leri
-/metrics ve /analyze rotaları için APIRouter
+Analiz ve Metrik Endpoint'leri - PostgreSQL Entegrasyonu
 """
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, status, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from database.connection import get_db
+from services.metrics_tracker_db import MetricsTrackerDB
 from schemas.requests import MetricsQueryRequest
 from schemas.metrics import AggregatedMetrics, MetricThresholds, GeminiAnalysisReport
-from services.metrics_tracker import metrics_tracker
 from services.gemini_analyzer import gemini_analyzer
 
 router = APIRouter(tags=["Analytics"])
+
+
+# Dependency Factory
+async def get_metrics_tracker(db: AsyncSession = Depends(get_db)):
+    """Her request için yeni tracker"""
+    return MetricsTrackerDB(db)
 
 
 # ============================================================================
@@ -21,17 +28,14 @@ router = APIRouter(tags=["Analytics"])
     response_model=AggregatedMetrics,
     summary="Toplam Metrikleri Getir"
 )
-async def get_aggregated_metrics(query: MetricsQueryRequest):
+async def get_aggregated_metrics(
+    query: MetricsQueryRequest,
+    metrics_tracker: MetricsTrackerDB = Depends(get_metrics_tracker)
+):
     """
-    Belirli zaman aralığındaki toplam metrikleri döndür
-    
-    Args:
-        query: Zaman penceresi (dakika cinsinden)
-        
-    Returns:
-        Toplanan metrikler (ortalamalar, dağılımlar, vb.)
+    Belirli zaman aralığındaki toplam metrikleri döndür (Async DB)
     """
-    return metrics_tracker.get_aggregated_metrics(
+    return await metrics_tracker.get_aggregated_metrics(
         time_window_minutes=query.time_window_minutes
     )
 
@@ -41,29 +45,44 @@ async def get_aggregated_metrics(query: MetricsQueryRequest):
     response_model=MetricThresholds,
     summary="Eşik Değerlerini Güncelle"
 )
-async def update_thresholds(thresholds: MetricThresholds):
+async def update_thresholds(
+    thresholds: MetricThresholds,
+    metrics_tracker: MetricsTrackerDB = Depends(get_metrics_tracker)
+):
     """
-    Metrik eşik değerlerini güncelle
+    Metrik eşik değerlerini güncelle (Async DB)
+    """
+    # Pydantic model'i dict'e çevir
+    threshold_dict = thresholds.model_dump()
     
-    Args:
-        thresholds: Yeni eşik değerleri
-        
-    Returns:
-        Güncellenen eşik değerleri
-    """
-    metrics_tracker.update_thresholds(thresholds)
-    return thresholds
+    # DB'ye kaydet
+    updated = await metrics_tracker.update_thresholds(threshold_dict)
+    
+    # Pydantic model'e geri dönüştür
+    return MetricThresholds(
+        min_confidence_warning=updated.min_confidence_warning,
+        min_confidence_critical=updated.min_confidence_critical,
+        max_inference_time_warning_ms=updated.max_inference_time_warning_ms,
+        max_inference_time_critical_ms=updated.max_inference_time_critical_ms
+    )
 
 
 @router.get(
     "/metrics/count",
     summary="Toplam Metrik Sayısı"
 )
-async def get_metrics_count():
-    """Toplam kaydedilmiş metrik sayısını döndür"""
+async def get_metrics_count(db: AsyncSession = Depends(get_db)):
+    """Toplam kaydedilmiş metrik sayısını döndür (Async DB)"""
+    from sqlalchemy import select, func
+    from database.models import PredictionMetricDB
+    
+    stmt = select(func.count()).select_from(PredictionMetricDB)
+    result = await db.execute(stmt)
+    total = result.scalar() or 0
+    
     return {
-        "total_metrics": len(metrics_tracker.metrics),
-        "description": "Uygulama başlatıldığından beri kaydedilen toplam tahmin sayısı"
+        "total_metrics": total,
+        "description": "Veritabanında kayıtlı toplam tahmin sayısı"
     }
 
 
@@ -76,30 +95,20 @@ async def get_metrics_count():
     response_model=GeminiAnalysisReport,
     summary="Gemini ile Performans Analizi"
 )
-async def analyze_performance(query: MetricsQueryRequest):
+async def analyze_performance(
+    query: MetricsQueryRequest,
+    metrics_tracker: MetricsTrackerDB = Depends(get_metrics_tracker)
+):
     """
-    Gemini AI kullanarak performans metriklerini analiz et
-    
-    İki zaman penceresi karşılaştırılır:
-    - Güncel: Son X dakika
-    - Önceki: X*2 ile X dakika arası
-    
-    Args:
-        query: Zaman penceresi (dakika cinsinden)
-        
-    Returns:
-        Gemini'nin oluşturduğu analiz raporu
-        
-    Raises:
-        HTTPException: Analiz hatası durumunda
+    Gemini AI kullanarak performans metriklerini analiz et (Async DB)
     """
     # Güncel metrikler
-    current_metrics = metrics_tracker.get_aggregated_metrics(
+    current_metrics = await metrics_tracker.get_aggregated_metrics(
         time_window_minutes=query.time_window_minutes
     )
     
     # Önceki dönem metrikleri (karşılaştırma için)
-    previous_metrics = metrics_tracker.get_aggregated_metrics(
+    previous_metrics = await metrics_tracker.get_aggregated_metrics(
         time_window_minutes=query.time_window_minutes * 2
     )
     
