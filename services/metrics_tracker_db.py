@@ -115,6 +115,17 @@ class MetricsTrackerDB:
             time_window_end=now
         )
     
+    async def get_total_count(self) -> int:
+        """
+        Veritabanındaki toplam metrik sayısını döndür
+        
+        Returns:
+            Toplam tahmin sayısı (int)
+        """
+        stmt = select(func.count()).select_from(PredictionMetricDB)
+        result = await self.session.execute(stmt)
+        return result.scalar() or 0
+    
     async def _get_or_create_model_version(self, version: str) -> ModelVersionDB:
         """Model versiyonunu bul veya oluştur"""
         stmt = select(ModelVersionDB).where(ModelVersionDB.version == version)
