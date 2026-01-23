@@ -1,10 +1,10 @@
 """
-FastAPI Model Server - Ana Uygulama
-Modüler yapı ile refactored
+FastAPI Model Server - PostgreSQL Entegrasyonu
 """
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
+from database.connection import create_tables
 from models.dummy_model import ml_model
 
 # Router imports
@@ -16,7 +16,7 @@ from routes.analytics import router as analytics_router
 app = FastAPI(
     title="FastAPI Model Server",
     description="ML Model Serving ve Performans İzleme API'si",
-    version="4.0.0",
+    version="5.0.0",  # PostgreSQL versiyonu
     docs_url="/docs",
     redoc_url="/redoc"
 )
@@ -37,6 +37,9 @@ async def startup_event():
     print("=" * 50)
     print("🚀 FastAPI Model Server başlatılıyor...")
     print("=" * 50)
+    
+    # Tabloları oluştur
+    await create_tables()
     
     # ML modelini yükle
     ml_model.load_model()
