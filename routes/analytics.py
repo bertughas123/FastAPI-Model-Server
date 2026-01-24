@@ -1,11 +1,12 @@
 """
 Analiz ve Metrik Endpoint'leri - PostgreSQL Entegrasyonu
 """
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException, status, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.connection import get_db
 from services.metrics_tracker_db import MetricsTrackerDB
+from core.rate_limiter_db import RateLimiterDB
 from schemas.requests import MetricsQueryRequest
 from schemas.metrics import AggregatedMetrics, MetricThresholds, GeminiAnalysisReport
 from services.gemini_analyzer import gemini_analyzer
@@ -13,10 +14,33 @@ from services.gemini_analyzer import gemini_analyzer
 router = APIRouter(tags=["Analytics"])
 
 
-# Dependency Factory
+# ============================================================================
+# DEPENDENCY FACTORIES
+# ============================================================================
+
 async def get_metrics_tracker(db: AsyncSession = Depends(get_db)):
     """Her request için yeni tracker"""
     return MetricsTrackerDB(db)
+
+
+async def get_analytics_limiter(db: AsyncSession = Depends(get_db)):
+    """Analytics için rate limiter (3 istek/dakika)"""
+    return RateLimiterDB(db, max_requests=3, time_window=60)
+
+
+async def check_analytics_rate_limit(
+    request: Request,
+    limiter: RateLimiterDB = Depends(get_analytics_limiter)
+):
+    """Gemini analiz endpoint'i için rate limit kontrolü"""
+    client_ip = request.client.host
+    
+    if not await limiter.is_allowed(client_ip, endpoint="/analyze/performance"):
+        remaining = await limiter.get_remaining_requests(client_ip)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Rate limit aşıldı. Dakikada maksimum 3 analiz isteği yapabilirsiniz. Kalan: {remaining}"
+        )
 
 
 # ============================================================================
@@ -84,20 +108,23 @@ async def get_metrics_count(
 
 
 # ============================================================================
-# GEMİNİ AI ANALİZ ENDPOİNTİ
+# GEMİNİ AI ANALİZ ENDPOİNTİ (Rate Limited)
 # ============================================================================
 
 @router.post(
     "/analyze/performance",
     response_model=GeminiAnalysisReport,
-    summary="Gemini ile Performans Analizi"
+    summary="Gemini ile Performans Analizi (Rate Limited: 3/dk)"
 )
 async def analyze_performance(
     query: MetricsQueryRequest,
+    _rate_limit: None = Depends(check_analytics_rate_limit),
     metrics_tracker: MetricsTrackerDB = Depends(get_metrics_tracker)
 ):
     """
     Gemini AI kullanarak performans metriklerini analiz et (Async DB)
+    
+    Rate Limit: Dakikada maksimum 3 istek
     """
     # Güncel metrikler
     current_metrics = await metrics_tracker.get_aggregated_metrics(
