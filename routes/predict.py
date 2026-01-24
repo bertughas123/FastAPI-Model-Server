@@ -1,7 +1,7 @@
 """
 Tahmin Endpoint'leri - PostgreSQL Entegrasyonu
 """
-from fastapi import APIRouter, HTTPException, status, Request, Depends
+from fastapi import APIRouter, HTTPException, status, Request, Depends, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime
 
@@ -31,6 +31,7 @@ async def get_rate_limiter(db: AsyncSession = Depends(get_db)):
 async def predict(
     request: PredictRequest,
     http_request: Request,
+    response: Response,
     rate_limiter: RateLimiterDB = Depends(get_rate_limiter),
     metrics_tracker: MetricsTrackerDB = Depends(get_metrics_tracker)
 ):
@@ -63,6 +64,12 @@ async def predict(
         input_length=len(request.text),
         model_version=ml_model.version
     )
+    
+    # Rate limit header'ları ekle
+    remaining = await rate_limiter.get_remaining_requests(client_ip)
+    response.headers["X-RateLimit-Limit"] = str(rate_limiter.max_requests)
+    response.headers["X-RateLimit-Remaining"] = str(remaining)
+    response.headers["X-RateLimit-Window"] = f"{rate_limiter.time_window}s"
     
     return PredictResponse(
         sentiment=prediction["sentiment"],
