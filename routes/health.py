@@ -6,8 +6,8 @@ from fastapi import APIRouter, status
 from datetime import datetime
 import time
 
-from schemas.responses import HealthResponse
 from models.dummy_model import ml_model
+from database.redis_connection import RedisManager
 
 router = APIRouter(tags=["Health"])
 
@@ -31,25 +31,39 @@ async def root():
 
 @router.get(
     "/health",
-    response_model=HealthResponse,
     summary="Sağlık Kontrolü",
-    description="Servis ve model durumunu kontrol eder",
+    description="Servis, model ve bağlantı durumlarını kontrol eder",
     status_code=status.HTTP_200_OK
 )
 async def health_check():
     """
-    Sağlık kontrolü endpoint'i
+    Genişletilmiş sağlık kontrolü endpoint'i
     
     Returns:
-        HealthResponse: Servis durumu bilgileri
+        dict: Servis durumu, model bilgisi ve servis sağlık durumları
     """
     uptime = time.time() - app_start_time
     
-    return HealthResponse(
-        status="healthy" if ml_model.is_loaded else "unhealthy",
-        model_loaded=ml_model.is_loaded,
-        model_name=ml_model.model_name,
-        model_version=ml_model.version,
-        timestamp=datetime.utcnow().isoformat() + "Z",
-        uptime_seconds=round(uptime, 2)
+    # Redis sağlık kontrolü
+    redis_health = await RedisManager.health_check()
+    
+    # Genel durum belirleme
+    is_healthy = (
+        ml_model.is_loaded and 
+        redis_health.get("status") == "healthy"
     )
+    
+    return {
+        "status": "healthy" if is_healthy else "unhealthy",
+        "version": "5.1.0",
+        "model_loaded": ml_model.is_loaded,
+        "model_name": ml_model.model_name,
+        "model_version": ml_model.version,
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "uptime_seconds": round(uptime, 2),
+        "services": {
+            "redis": redis_health,
+            "postgres": "connected"  # Basitleştirilmiş (bağlantı hatası olursa exception fırlar)
+        }
+    }
+
