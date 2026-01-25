@@ -1,10 +1,11 @@
 """
-FastAPI Model Server - PostgreSQL Entegrasyonu
+FastAPI Model Server - PostgreSQL + Redis Entegrasyonu
 """
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from database.connection import create_tables
+from database.redis_connection import RedisManager
 from models.dummy_model import ml_model
 
 # Router imports
@@ -16,7 +17,7 @@ from routes.analytics import router as analytics_router
 app = FastAPI(
     title="FastAPI Model Server",
     description="ML Model Serving ve Performans İzleme API'si",
-    version="5.0.0",  # PostgreSQL versiyonu
+    version="5.1.0",  # Redis entegrasyonu
     docs_url="/docs",
     redoc_url="/redoc"
 )
@@ -38,8 +39,11 @@ async def startup_event():
     print("🚀 FastAPI Model Server başlatılıyor...")
     print("=" * 50)
     
-    # Tabloları oluştur
+    # PostgreSQL tabloları oluştur
     await create_tables()
+    
+    # Redis bağlantısını başlat
+    await RedisManager.initialize()
     
     # ML modelini yükle
     ml_model.load_model()
@@ -54,6 +58,12 @@ async def startup_event():
 async def shutdown_event():
     """Uygulama kapatıldığında çalışır"""
     print("🔴 Sunucu kapatılıyor...")
+    
+    # Redis bağlantısını kapat
+    await RedisManager.close()
+    
+    print("🔴 Kapatma tamamlandı")
+
 
 
 # ============================================================================
