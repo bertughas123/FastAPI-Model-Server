@@ -41,12 +41,13 @@ class GeminiAnalyzer:
         self.temperature = float(os.getenv("GEMINI_TEMPERATURE", "0.3"))
         self.max_tokens = int(os.getenv("GEMINI_MAX_TOKENS", "1024"))
         
-        # Model instance
+        # Model instance (Native JSON Mode)
         self.model = genai.GenerativeModel(
             model_name=self.model_name,
             generation_config={
                 "temperature": self.temperature,
                 "max_output_tokens": self.max_tokens,
+                "response_mime_type": "application/json",  # Native JSON mode (sabit)
             }
         )
         
@@ -274,34 +275,20 @@ Aşağıdaki JSON formatında bir analiz raporu oluştur:
         response_text: str,
         metrics: AggregatedMetrics
     ) -> GeminiAnalysisReport:
-        """Gemini'nin JSON yanıtını parse et"""
+        """
+        Gemini'nin JSON yanıtını Pydantic ile parse et (Native JSON Mode)
         
+        response_mime_type="application/json" sayesinde Gemini doğrudan
+        JSON döner, manuel string parsing'e gerek yok.
+        """
         try:
-            # JSON'ı çıkar (bazen markdown kod bloğu içinde geliyor)
-            json_str = response_text
-            if "```json" in response_text:
-                json_str = response_text.split("```json")[1].split("```")[0].strip()
-            elif "```" in response_text:
-                json_str = response_text.split("```")[1].split("```")[0].strip()
+            # Pydantic native JSON validation
+            report = GeminiAnalysisReport.model_validate_json(response_text)
             
-            # Parse et
-            data = json.loads(json_str)
+            # Metrik bilgisini manuel olarak ekle (Gemini bunu bilmiyor)
+            report.metrics_analyzed = metrics
             
-            # PerformanceIssue objelerine dönüştür
-            issues = [
-                PerformanceIssue(**issue)
-                for issue in data.get("identified_issues", [])
-            ]
-            
-            # GeminiAnalysisReport oluştur
-            return GeminiAnalysisReport(
-                summary=data.get("summary", "Analiz tamamlandı"),
-                identified_issues=issues,
-                recommendations=data.get("recommendations", []),
-                root_cause_hypothesis=data.get("root_cause_hypothesis", "Belirsiz"),
-                confidence_score=data.get("confidence_score", 0.5),
-                metrics_analyzed=metrics
-            )
+            return report
             
         except Exception as e:
             print(f"⚠️ Gemini yanıtı parse edilemedi: {e}")

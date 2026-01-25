@@ -291,7 +291,8 @@ class GeminiAnalysisReport(BaseModel):
         description="Öneriler listesi"
     )
     
-    root_cause_hypothesis: str = Field(
+    root_cause_hypothesis: Optional[str] = Field(
+        default=None,
         description="Kök neden hipotezi"
     )
     
@@ -306,8 +307,9 @@ class GeminiAnalysisReport(BaseModel):
         description="Rapor oluşturulma zamanı"
     )
     
-    metrics_analyzed: AggregatedMetrics = Field(
-        description="Analiz edilen metrikler"
+    metrics_analyzed: Optional[AggregatedMetrics] = Field(
+        default=None,
+        description="Analiz edilen metrikler (Python tarafında eklenir)"
     )
     
     class Config:
