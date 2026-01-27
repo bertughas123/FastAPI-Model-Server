@@ -253,13 +253,21 @@ Bir sentiment analiz modelinin performans metriklerini analiz etmelisin.
         if previous and previous.total_predictions > 0:
             conf_change = ((current.average_confidence - previous.average_confidence) 
                           / previous.average_confidence * 100)
-            latency_change = ((current.average_inference_time_ms - previous.average_inference_time_ms)
-                             / previous.average_inference_time_ms * 100)
+            
+            # P95 Gecikme Değişimi (tail latency analizi için daha profesyonel)
+            # Fallback: p95 değeri None veya 0 ise hesaplama yapma
+            if (previous.p95_inference_time_ms and previous.p95_inference_time_ms > 0 and
+                current.p95_inference_time_ms and current.p95_inference_time_ms > 0):
+                p95_latency_change = ((current.p95_inference_time_ms - previous.p95_inference_time_ms)
+                                     / previous.p95_inference_time_ms * 100)
+                p95_change_text = f"{p95_latency_change:+.1f}%"
+            else:
+                p95_change_text = "Hesaplanamadı (yetersiz veri)"
             
             prompt += f"""
 ## ÖNCEKİ DÖNEM İLE KARŞILAŞTIRMA
 - Güven Skoru Değişimi: {conf_change:+.1f}%
-- Gecikme Değişimi: {latency_change:+.1f}%
+- P95 Gecikme Değişimi: {p95_change_text}
 - Tahmin Sayısı Farkı: {current.total_predictions - previous.total_predictions:+d}
 """
         
