@@ -62,7 +62,7 @@ class GeminiAnalyzerRedis:
         self.temperature = float(os.getenv("GEMINI_TEMPERATURE", "0.3"))
         self.max_tokens = int(os.getenv("GEMINI_MAX_TOKENS", "1024"))
         
-        # Model instance (Native JSON Mode)
+        # Model instance (Native JSON Mode - 0.4.0+ gerektirir)
         self.model = genai.GenerativeModel(
             model_name=self.model_name,
             generation_config={
