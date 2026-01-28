@@ -1,5 +1,9 @@
 """
-Analiz ve Metrik Endpoint'leri - PostgreSQL Entegrasyonu
+Analiz ve Metrik Endpoint'leri - PostgreSQL + Redis Entegrasyonu
+
+Çift Katmanlı Koruma Mimarisi:
+1. Ingress (PostgreSQL): Bot/spam koruması (60 req/min per IP)
+2. Egress (Redis): API kota koruması (10 req/min global) - GeminiAnalyzerRedis içinde
 """
 from fastapi import APIRouter, HTTPException, status, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,27 +23,58 @@ router = APIRouter(tags=["Analytics"])
 # ============================================================================
 
 async def get_metrics_tracker(db: AsyncSession = Depends(get_db)):
-    """Her request için yeni tracker"""
+    """Her request için yeni metrics tracker"""
     return MetricsTrackerDB(db)
 
 
 async def get_analytics_limiter(db: AsyncSession = Depends(get_db)):
-    """Analytics için rate limiter (3 istek/dakika)"""
-    return RateLimiterDB(db, max_requests=3, time_window=60)
+    """
+    Analytics endpoint'leri için rate limiter (Ingress Katmanı)
+    
+    ╔═══════════════════════════════════════════════════════════════════╗
+    ║ NOT: Limit 60 req/min olarak ayarlandı (önceki: 3 req/min)        ║
+    ╠═══════════════════════════════════════════════════════════════════╣
+    ║ NEDEN GEVŞETİLDİ?                                                 ║
+    ║                                                                    ║
+    ║ 1. ÇİFT KATMANLI MİMARİ:                                          ║
+    ║    • Bu katman (PostgreSQL): Sadece bot/spam engellemesi          ║
+    ║    • İkinci katman (Redis): Gerçek API kota koruması (10/dk)      ║
+    ║                                                                    ║
+    ║ 2. CACHE DAVRANIŞI:                                               ║
+    ║    • Gemini servisinde cache HIT olursa → Rate limit artmaz       ║
+    ║    • Düşük limit + cache = Meşru kullanıcılar gereksiz engellenir ║
+    ║                                                                    ║
+    ║ 3. KABA KUVVET KORUMASI:                                          ║
+    ║    • 60/dk bir insan için çok fazla (1 istek/saniye)              ║
+    ║    • Bot saldırısı için yetersiz (engellenir)                     ║
+    ║    • Gerçek koruma Redis global limitinde                         ║
+    ╚═══════════════════════════════════════════════════════════════════╝
+    """
+    return RateLimiterDB(
+        db, 
+        max_requests=60,   # Gevşetildi: 3 → 60
+        time_window=60     # 1 dakika
+    )
 
 
 async def check_analytics_rate_limit(
     request: Request,
     limiter: RateLimiterDB = Depends(get_analytics_limiter)
 ):
-    """Gemini analiz endpoint'i için rate limit kontrolü"""
+    """
+    Ingress rate limit kontrolü (PostgreSQL)
+    
+    Bu katman sadece kaba kuvvet saldırılarını durdurur.
+    Gerçek API koruması GeminiAnalyzerRedis içinde (Redis).
+    """
     client_ip = request.client.host
     
     if not await limiter.is_allowed(client_ip, endpoint="/analyze/performance"):
         remaining = await limiter.get_remaining_requests(client_ip)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"Rate limit aşıldı. Dakikada maksimum 3 analiz isteği yapabilirsiniz. Kalan: {remaining}"
+            detail=f"Spam koruması aktif. Dakikada maksimum 60 istek. Kalan: {remaining}",
+            headers={"X-Rate-Limit-Layer": "ingress-postgres"}
         )
 
 
@@ -108,23 +143,40 @@ async def get_metrics_count(
 
 
 # ============================================================================
-# GEMİNİ AI ANALİZ ENDPOİNTİ (Rate Limited)
+# GEMİNİ AI ANALİZ ENDPOİNTİ (Çift Katmanlı Koruma)
 # ============================================================================
 
 @router.post(
     "/analyze/performance",
     response_model=GeminiAnalysisReport,
-    summary="Gemini ile Performans Analizi (Rate Limited: 3/dk)"
+    summary="Gemini ile Performans Analizi",
+    description="""
+    Performans metriklerini Gemini AI ile analiz eder.
+    
+    **Koruma Katmanları:**
+    1. **Ingress (PostgreSQL):** Spam koruması (60 req/min per IP)
+    2. **Egress (Redis):** API kota koruması (10 req/min global)
+    
+    **Cache Davranışı:**
+    - Aynı metrikler için cache'ten döner (rate limit tüketmez)
+    - Cache TTL: 5 dakika
+    """
 )
 async def analyze_performance(
     query: MetricsQueryRequest,
-    _rate_limit: None = Depends(check_analytics_rate_limit),
+    _rate_limit: None = Depends(check_analytics_rate_limit),  # Katman 1: Ingress
     metrics_tracker: MetricsTrackerDB = Depends(get_metrics_tracker)
 ):
     """
-    Gemini AI kullanarak performans metriklerini analiz et (Async DB)
+    Gemini AI ile performans analizi (Çift Katmanlı Koruma)
     
-    Rate Limit: Dakikada maksimum 3 istek
+    Akış:
+    1. Ingress Rate Limit (PostgreSQL) ← Burada geçti
+    2. → GeminiAnalyzerRedis.analyze_performance()
+       2a. Redis Cache kontrolü
+       2b. Redis Rate Limit kontrolü (sadece cache miss)
+       2c. Gemini API çağrısı
+       2d. Cache'e kaydet
     """
     # Güncel metrikler
     current_metrics = await metrics_tracker.get_aggregated_metrics(
@@ -136,13 +188,14 @@ async def analyze_performance(
         time_window_minutes=query.time_window_minutes * 2
     )
     
-    # Gemini ile analiz et
+    # Gemini analizi (Redis cache + rate limit içeride)
     try:
-        report = gemini_analyzer.analyze_performance(
+        report = await gemini_analyzer.analyze_performance(
             current_metrics=current_metrics,
             previous_metrics=previous_metrics
         )
         return report
+        
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
