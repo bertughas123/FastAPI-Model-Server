@@ -184,12 +184,12 @@ class GeminiAnalyzerRedis:
             f"Bekleniyor: {retry_state.next_action.sleep:.1f}s"
         )
     )
-    def _call_gemini_api(self, prompt: str) -> str:
+    async def _call_gemini_api(self, prompt: str) -> str:
         """
-        Gemini API'ye istek at (Retry korumalı)
+        Gemini API'ye istek at (Native Async + Retry korumalı)
         
-        Bu method SADECE API çağrısını yapar.
-        Cache, rate limit, parse işlemleri burada YOK.
+        google-generativeai 0.8.6+ sürümünde generate_content_async()
+        native async desteği sağlar. Event loop'u bloklamaz.
         
         Retry edilecek hatalar:
         - 503 ServiceUnavailable
@@ -214,7 +214,8 @@ class GeminiAnalyzerRedis:
             ResourceExhausted: 429 hatası (retry yapılmadan)
             Diğer Exception'lar: Retry dışı hatalar
         """
-        response = self.model.generate_content(prompt)
+        # Native async API çağrısı (google-generativeai 0.8.6+)
+        response = await self.model.generate_content_async(prompt)
         return response.text
     
     async def analyze_performance(
@@ -288,8 +289,8 @@ class GeminiAnalyzerRedis:
         prompt = self._build_analysis_prompt(current_metrics, previous_metrics)
         
         try:
-            # Retry korumalı API çağrısı
-            response_text = self._call_gemini_api(prompt)
+            # Retry korumalı API çağrısı (async - event loop'u bloklamaz)
+            response_text = await self._call_gemini_api(prompt)
             report = self._parse_gemini_response(response_text, current_metrics)
             
         except RetryError as e:
