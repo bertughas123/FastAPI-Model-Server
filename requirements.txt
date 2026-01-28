@@ -11,3 +11,6 @@ greenlet==3.1.1
 
 # Redis (Cache & Rate Limiting)
 redis[hiredis]==5.0.1
+
+# Resilience & Retry
+tenacity==8.2.3

@@ -1,17 +1,36 @@
 """
 Gemini API ile Performans Analizi Servisi
-Redis Tabanlı Cache ve Rate Limiting
+Redis Tabanlı Cache ve Rate Limiting + Tenacity Resilience
 
 Özellikler:
 - Cache-First Pattern: Önce Redis cache kontrol edilir
 - Global Rate Limiting: Tüm worker'lar aynı sayacı paylaşır
 - Fallback: API hatalarında kural tabanlı analiz
 - Lazy Initialization: Redis servisleri ilk çağrıda başlatılır
+- Retry Mechanism: Geçici hatalarda Exponential Backoff ile yeniden deneme
 """
 import google.generativeai as genai
 from typing import Optional
 import os
 from dotenv import load_dotenv
+
+# Tenacity - Retry mekanizması
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    wait_random,
+    retry_if_exception_type,
+    RetryError
+)
+
+# Google API hataları
+from google.api_core.exceptions import (
+    ServiceUnavailable,      # 503 - Geçici, retry mantıklı
+    DeadlineExceeded,        # Timeout - Geçici, retry mantıklı
+    InternalServerError,     # 500 - Bazen geçici
+    ResourceExhausted,       # 429 - Rate limit (retry YAPMA!)
+)
 
 from schemas.metrics import (
     AggregatedMetrics,
@@ -33,10 +52,15 @@ class GeminiAnalyzerRedis:
     - Cache: Aynı metrikler için tekrar API çağrısı yapma
     - Rate Limit: Global API kota koruması (Sliding Window)
     
+    Resilience (Tenacity):
+    - Geçici hatalarda (503, 500, Timeout) 4 deneme
+    - Exponential Backoff + Jitter
+    - 429 (ResourceExhausted) retry YAPILMAZ
+    
     Akış:
     1. Cache kontrolü (HIT → direkt döndür, rate limit artmaz)
     2. Rate limit kontrolü (MISS → limit check)
-    3. API isteği
+    3. API isteği (Retry korumalı)
     4. Cache'e kaydet
     """
     
@@ -79,10 +103,14 @@ class GeminiAnalyzerRedis:
         # Cache ayarları
         self.cache_ttl = int(os.getenv("GEMINI_CACHE_TTL", "300"))  # 5 dakika
         
-        print(f"✅ Gemini Analyzer (Redis) hazır")
+        # Retry ayarları
+        self.max_retries = 4  # Toplam deneme sayısı
+        
+        print(f"✅ Gemini Analyzer (Redis + Tenacity) hazır")
         print(f"   Model: {self.model_name}")
         print(f"   Rate Limit: {self.rate_limit_max} req/min (Global)")
         print(f"   Cache TTL: {self.cache_ttl}s")
+        print(f"   Retry: {self.max_retries} deneme (Exponential Backoff)")
     
     def _ensure_services(self) -> None:
         """
@@ -136,6 +164,59 @@ class GeminiAnalyzerRedis:
             prev_total=previous.total_predictions if previous else 0
         )
     
+    # ═══════════════════════════════════════════════════════════════════════════
+    # RETRY KORUMASLI API ÇAĞRISI
+    # ═══════════════════════════════════════════════════════════════════════════
+    
+    @retry(
+        stop=stop_after_attempt(4),  # Maksimum 4 deneme
+        wait=wait_exponential(multiplier=1, min=1, max=10) + wait_random(0, 1),  # Exp backoff + jitter
+        retry=retry_if_exception_type((
+            ServiceUnavailable,      # 503 - Geçici, retry mantıklı
+            DeadlineExceeded,        # Timeout - Geçici, retry mantıklı
+            InternalServerError,     # 500 - Bazen geçici
+            ConnectionError,         # Network - Geçici
+            TimeoutError,            # Python timeout - Geçici
+        )),
+        # ❌ ResourceExhausted (429) burada YOK - Redis rate limit zaten var
+        before_sleep=lambda retry_state: print(
+            f"⏳ Retry #{retry_state.attempt_number} - "
+            f"Bekleniyor: {retry_state.next_action.sleep:.1f}s"
+        )
+    )
+    def _call_gemini_api(self, prompt: str) -> str:
+        """
+        Gemini API'ye istek at (Retry korumalı)
+        
+        Bu method SADECE API çağrısını yapar.
+        Cache, rate limit, parse işlemleri burada YOK.
+        
+        Retry edilecek hatalar:
+        - 503 ServiceUnavailable
+        - 500 InternalServerError
+        - DeadlineExceeded (Timeout)
+        - ConnectionError
+        - TimeoutError
+        
+        Retry EDİLMEYECEK hatalar:
+        - 429 ResourceExhausted (Redis rate limit var)
+        - 400 InvalidArgument (düzeltilmesi gereken hata)
+        - 401/403 Authentication (retry ile düzelmez)
+        
+        Args:
+            prompt: Gemini'ye gönderilecek prompt
+            
+        Returns:
+            str: Gemini'nin yanıt metni
+            
+        Raises:
+            RetryError: Tüm denemeler başarısız olduysa
+            ResourceExhausted: 429 hatası (retry yapılmadan)
+            Diğer Exception'lar: Retry dışı hatalar
+        """
+        response = self.model.generate_content(prompt)
+        return response.text
+    
     async def analyze_performance(
         self,
         current_metrics: AggregatedMetrics,
@@ -154,7 +235,7 @@ class GeminiAnalyzerRedis:
         Akış:
         1. Cache kontrolü (HIT → direkt döndür, rate limit artmaz)
         2. Rate limit kontrolü (MISS → limit check)
-        3. API isteği
+        3. API isteği (Tenacity retry korumalı)
         4. Cache'e kaydet
         """
         if not self.model:
@@ -202,18 +283,32 @@ class GeminiAnalyzerRedis:
         print(f"🚦 Rate limit OK. Kalan: {remaining}")
         
         # ═══════════════════════════════════════════════════════════════════
-        # ADIM 3: API İSTEĞİ
+        # ADIM 3: API İSTEĞİ (Tenacity Retry Korumalı)
         # ═══════════════════════════════════════════════════════════════════
+        prompt = self._build_analysis_prompt(current_metrics, previous_metrics)
+        
         try:
-            prompt = self._build_analysis_prompt(current_metrics, previous_metrics)
+            # Retry korumalı API çağrısı
+            response_text = self._call_gemini_api(prompt)
+            report = self._parse_gemini_response(response_text, current_metrics)
             
-            # Gemini API çağrısı (sync - google.generativeai sync'tir)
-            response = self.model.generate_content(prompt)
-            report = self._parse_gemini_response(response.text, current_metrics)
-            
+        except RetryError as e:
+            # Tüm retry denemeleri başarısız oldu
+            original_error = e.last_attempt.exception()
+            error_msg = f"{self.max_retries} deneme başarısız: {type(original_error).__name__}"
+            print(f"❌ {error_msg}")
+            return self._create_fallback_report(current_metrics, error_msg)
+        
+        except ResourceExhausted as e:
+            # 429 hatası - Retry YAPILMADI (doğru davranış)
+            error_msg = f"Google API kota aşıldı (429): {str(e)}"
+            print(f"❌ {error_msg}")
+            return self._create_fallback_report(current_metrics, error_msg)
+        
         except Exception as e:
+            # Diğer beklenmeyen hatalar (parse error vb.)
             error_msg = str(e)
-            print(f"❌ Gemini API hatası: {error_msg}")
+            print(f"❌ Gemini hatası: {error_msg}")
             return self._create_fallback_report(current_metrics, error_msg)
         
         # ═══════════════════════════════════════════════════════════════════
@@ -339,9 +434,10 @@ Aşağıdaki JSON formatında bir analiz raporu oluştur:
         
         Tetiklenme durumları:
         - Rate limit aşıldı
-        - API hatası
+        - API hatası (tüm retry'lar başarısız)
         - Parse hatası
         - API key yok
+        - 429 ResourceExhausted
         """
         issues = []
         recommendations = []
