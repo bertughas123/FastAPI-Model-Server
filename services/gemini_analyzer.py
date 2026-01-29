@@ -218,6 +218,61 @@ class GeminiAnalyzerRedis:
         response = await self.model.generate_content_async(prompt)
         return response.text
     
+    async def _fetch_from_gemini(
+        self,
+        current_metrics: AggregatedMetrics,
+        previous_metrics: Optional[AggregatedMetrics]
+    ) -> GeminiAnalysisReport:
+        """
+        Gemini'den rapor al (Rate Limit + API + Parse)
+        
+        Bu factory fonksiyonu get_or_set_with_lock içinde çağrılır.
+        Lock içinde çalışır, yani sadece 1 istek API'ye gider.
+        
+        ╔═══════════════════════════════════════════════════════════════════╗
+        ║ FACTORY PATTERN                                                    ║
+        ╠═══════════════════════════════════════════════════════════════════╣
+        ║ Bu method şunları yapıyor:                                        ║
+        ║ 1. Rate limit kontrolü                                            ║
+        ║ 2. Prompt oluşturma                                               ║
+        ║ 3. API çağrısı (Retry korumalı)                                   ║
+        ║ 4. Response parsing                                               ║
+        ║                                                                    ║
+        ║ Lock içinde çağrıldığı için Cache Stampede olmaz!                 ║
+        ╚═══════════════════════════════════════════════════════════════════╝
+        
+        Args:
+            current_metrics: Güncel metrikler
+            previous_metrics: Karşılaştırma için önceki metrikler
+            
+        Returns:
+            GeminiAnalysisReport: Analiz raporu
+            
+        Raises:
+            Exception: Rate limit aşıldıysa veya API hatası
+        """
+        # Rate limit kontrolü
+        allowed, remaining = await GeminiAnalyzerRedis._rate_limiter.is_allowed("global")
+        
+        if not allowed:
+            reset_time = await GeminiAnalyzerRedis._rate_limiter.get_reset_time("global")
+            raise Exception(
+                f"Global rate limit aşıldı ({self.rate_limit_max}/dk). "
+                f"Yeniden deneme: {reset_time} saniye"
+            )
+        
+        print(f"🚦 Rate limit OK. Kalan: {remaining}")
+        
+        # Prompt oluştur
+        prompt = self._build_analysis_prompt(current_metrics, previous_metrics)
+        
+        # API çağrısı (Retry korumalı)
+        response_text = await self._call_gemini_api(prompt)
+        
+        # Parse et
+        report = self._parse_gemini_response(response_text, current_metrics)
+        return report
+    
     async def analyze_performance(
         self,
         current_metrics: AggregatedMetrics,
@@ -225,6 +280,7 @@ class GeminiAnalyzerRedis:
     ) -> GeminiAnalysisReport:
         """
         Performans metriklerini Gemini ile analiz et
+        (Cache Stampede korumalı - Distributed Locking)
         
         Args:
             current_metrics: Güncel metrikler
@@ -233,11 +289,13 @@ class GeminiAnalyzerRedis:
         Returns:
             GeminiAnalysisReport: Analiz raporu
         
-        Akış:
-        1. Cache kontrolü (HIT → direkt döndür, rate limit artmaz)
-        2. Rate limit kontrolü (MISS → limit check)
-        3. API isteği (Tenacity retry korumalı)
-        4. Cache'e kaydet
+        Akış (get_or_set_with_lock):
+        1. Cache kontrolü (HIT → direkt döndür)
+        2. Lock edin (sadece 1 istek API'ye gider)
+        3. Double-check cache (biri yazmış olabilir)
+        4. Factory çalıştır (rate limit + API + parse)
+        5. Cache'e kaydet
+        6. Lock serbest bırak
         """
         if not self.model:
             return self._create_fallback_report(
@@ -248,50 +306,30 @@ class GeminiAnalyzerRedis:
         # Redis servislerini başlat (lazy)
         self._ensure_services()
         
-        # ═══════════════════════════════════════════════════════════════════
-        # ADIM 1: CACHE KONTROLÜ
-        # Cache HIT → Rate limit artmaz, direkt döndür
-        # ═══════════════════════════════════════════════════════════════════
+        # Cache key oluştur
         cache_key = self._generate_cache_key(current_metrics, previous_metrics)
         
-        cached_report = await GeminiAnalyzerRedis._cache_service.get(
-            cache_key,
-            GeminiAnalysisReport
-        )
-        
-        if cached_report:
-            print(f"📦 Cache HIT: {cache_key[:8]}...")
-            # Metrikleri güncelle (cache'te None olabilir)
-            cached_report.metrics_analyzed = current_metrics
-            return cached_report
-        
-        print(f"📭 Cache MISS: {cache_key[:8]}...")
-        
-        # ═══════════════════════════════════════════════════════════════════
-        # ADIM 2: RATE LIMIT KONTROLÜ (Sadece cache miss'te)
-        # Bu sayede 100 istek gelse bile sadece 1 API çağrısı yapılır
-        # ═══════════════════════════════════════════════════════════════════
-        allowed, remaining = await GeminiAnalyzerRedis._rate_limiter.is_allowed("global")
-        
-        if not allowed:
-            reset_time = await GeminiAnalyzerRedis._rate_limiter.get_reset_time("global")
-            return self._create_fallback_report(
-                current_metrics,
-                f"Global rate limit aşıldı ({self.rate_limit_max}/dk). "
-                f"Yeniden deneme: {reset_time} saniye"
-            )
-        
-        print(f"🚦 Rate limit OK. Kalan: {remaining}")
-        
-        # ═══════════════════════════════════════════════════════════════════
-        # ADIM 3: API İSTEĞİ (Tenacity Retry Korumalı)
-        # ═══════════════════════════════════════════════════════════════════
-        prompt = self._build_analysis_prompt(current_metrics, previous_metrics)
+        # Factory fonksiyonu (lock içinde çalışacak)
+        async def factory():
+            return await self._fetch_from_gemini(current_metrics, previous_metrics)
         
         try:
-            # Retry korumalı API çağrısı (async - event loop'u bloklamaz)
-            response_text = await self._call_gemini_api(prompt)
-            report = self._parse_gemini_response(response_text, current_metrics)
+            # ═══════════════════════════════════════════════════════════════
+            # DISTRIBUTED LOCKING İLE CACHE KONTROLÜ
+            # Aynı anda 50 istek gelse bile sadece 1'i API'ye gider!
+            # ═══════════════════════════════════════════════════════════════
+            report = await GeminiAnalyzerRedis._cache_service.get_or_set_with_lock(
+                key=cache_key,
+                model_class=GeminiAnalysisReport,
+                factory=factory,
+                ttl=self.cache_ttl,
+                lock_timeout=30,
+                lock_blocking_timeout=15.0
+            )
+            
+            # Metrikleri güncelle (cache'te None olabilir)
+            report.metrics_analyzed = current_metrics
+            return report
             
         except RetryError as e:
             # Tüm retry denemeleri başarısız oldu
@@ -299,31 +337,18 @@ class GeminiAnalyzerRedis:
             error_msg = f"{self.max_retries} deneme başarısız: {type(original_error).__name__}"
             print(f"❌ {error_msg}")
             return self._create_fallback_report(current_metrics, error_msg)
-        
+            
         except ResourceExhausted as e:
             # 429 hatası - Retry YAPILMADI (doğru davranış)
             error_msg = f"Google API kota aşıldı (429): {str(e)}"
             print(f"❌ {error_msg}")
             return self._create_fallback_report(current_metrics, error_msg)
-        
+            
         except Exception as e:
-            # Diğer beklenmeyen hatalar (parse error vb.)
+            # Diğer beklenmeyen hatalar (rate limit, parse error vb.)
             error_msg = str(e)
-            print(f"❌ Gemini hatası: {error_msg}")
+            print(f"❌ Hata: {error_msg}")
             return self._create_fallback_report(current_metrics, error_msg)
-        
-        # ═══════════════════════════════════════════════════════════════════
-        # ADIM 4: CACHE'E KAYDET
-        # Bir sonraki aynı istek için hazır
-        # ═══════════════════════════════════════════════════════════════════
-        await GeminiAnalyzerRedis._cache_service.set(
-            cache_key,
-            report,
-            ttl=self.cache_ttl
-        )
-        print(f"💾 Cache kaydedildi: {cache_key[:8]}... (TTL: {self.cache_ttl}s)")
-        
-        return report
     
     def _build_analysis_prompt(
         self,
