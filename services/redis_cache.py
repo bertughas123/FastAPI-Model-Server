@@ -291,6 +291,116 @@ class RedisCacheService:
         
         return value
     
+    async def get_or_set_with_lock(
+        self,
+        key: str,
+        model_class: Type[T],
+        factory,  # Callable that returns Awaitable[T]
+        ttl: Optional[int] = None,
+        lock_timeout: int = 30,
+        lock_blocking_timeout: float = 10.0
+    ) -> T:
+        """
+        Cache Stampede korumalı get-or-set operasyonu
+        
+        Double-Checked Locking Pattern:
+        1. Cache kontrolü (hızlı path)
+        2. Lock edin
+        3. TEKRAR cache kontrolü (biri yazmış olabilir)
+        4. Factory çalıştır (API çağrısı)
+        5. Cache'e yaz
+        
+        ╔═══════════════════════════════════════════════════════════════════╗
+        ║ CACHE STAMPEDE NEDİR?                                              ║
+        ╠═══════════════════════════════════════════════════════════════════╣
+        ║ 50 istek aynı anda geliyor, hepsi cache miss alıyor               ║
+        ║ → 50 paralel API çağrısı → Maliyet + Rate Limit aşımı!            ║
+        ║                                                                    ║
+        ║ ÇÖZÜM: Lock ile sadece 1 istek API'ye gider, diğerleri bekler     ║
+        ╚═══════════════════════════════════════════════════════════════════╝
+        
+        Args:
+            key: Cache key
+            model_class: Pydantic model sınıfı (deserialize için)
+            factory: Cache miss durumunda çalıştırılacak async fonksiyon
+            ttl: Cache TTL (saniye)
+            lock_timeout: Lock'un maksimum tutulma süresi (saniye)
+            lock_blocking_timeout: Lock bekleme timeout'u (saniye)
+            
+        Returns:
+            T: Cache'teki veya factory'den gelen değer
+            
+        Raises:
+            LockError: Lock alınamazsa
+            Exception: Factory hatası
+        """
+        full_key = self._get_key(key)
+        lock_key = f"{full_key}:lock"
+        ttl = ttl or self.default_ttl
+        
+        # ═══════════════════════════════════════════════════════════════
+        # ADIM 1: İLK CACHE KONTROLÜ (Fast Path)
+        # Lock almadan önce kontrol et - çoğu durumda cache hit olacak
+        # ═══════════════════════════════════════════════════════════════
+        cached = await self.get(key, model_class)
+        if cached is not None:
+            print(f"📦 Cache HIT (no lock needed): {key[:8]}...")
+            return cached
+        
+        print(f"📭 Cache MISS (acquiring lock): {key[:8]}...")
+        
+        # ═══════════════════════════════════════════════════════════════
+        # ADIM 2: LOCK EDİN
+        # Sadece 1 istek API'ye gidebilir, diğerleri bekler
+        # ═══════════════════════════════════════════════════════════════
+        lock = self.redis.lock(
+            lock_key,
+            timeout=lock_timeout,
+            blocking_timeout=lock_blocking_timeout
+        )
+        
+        try:
+            acquired = await lock.acquire(blocking=True)
+            
+            if not acquired:
+                # Lock alınamadı (timeout) - factory'yi direkt çalıştır
+                print(f"⚠️ Lock timeout, factory çalıştırılıyor: {key[:8]}...")
+                return await factory()
+            
+            print(f"🔒 Lock acquired: {key[:8]}...")
+            
+            # ═══════════════════════════════════════════════════════════
+            # ADIM 3: DOUBLE-CHECK (Biz beklerken biri yazmış olabilir)
+            # ═══════════════════════════════════════════════════════════
+            cached = await self.get(key, model_class)
+            if cached is not None:
+                print(f"📦 Cache HIT (after lock): {key[:8]}...")
+                return cached
+            
+            # ═══════════════════════════════════════════════════════════
+            # ADIM 4: FACTORY ÇALIŞTIR (API çağrısı)
+            # ═══════════════════════════════════════════════════════════
+            print(f"🏭 Factory çalıştırılıyor: {key[:8]}...")
+            result = await factory()
+            
+            # ═══════════════════════════════════════════════════════════
+            # ADIM 5: CACHE'E YAZ
+            # ═══════════════════════════════════════════════════════════
+            await self.set(key, result, ttl=ttl)
+            print(f"💾 Cache yazıldı: {key[:8]}... (TTL: {ttl}s)")
+            
+            return result
+            
+        finally:
+            # ═══════════════════════════════════════════════════════════
+            # ADIM 6: LOCK SERBEST BIRAK
+            # ═══════════════════════════════════════════════════════════
+            try:
+                await lock.release()
+                print(f"🔓 Lock released: {key[:8]}...")
+            except Exception:
+                pass  # Lock zaten serbest veya timeout olmuş olabilir
+    
     async def get_stats(self) -> dict:
         """
         Cache istatistikleri (debug için)
