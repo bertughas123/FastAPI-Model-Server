@@ -57,7 +57,7 @@ class FallbackEngine:
             summary=summary,
             identified_issues=issues,
             recommendations=recommendations,
-            root_cause_hypothesis="Gemini API kullanılamadığı için kural tabanlı analiz yapıldı",
+            root_cause_hypothesis=f"Otomatik analiz (Fallback). Sebep: {error_reason}",
             confidence_score=0.3,  # Düşük güven (kural tabanlı)
             metrics_analyzed=metrics
         )
