@@ -1,11 +1,12 @@
 """
-SQLAlchemy ORM Modelleri
-Pydantic şemalarından dönüştürülmüştür
+SQLAlchemy ORM Modelleri - Generic AI Platform
+Herhangi bir ML model tipini destekleyen esnek yapı
 """
 from sqlalchemy import (
     Column, Integer, String, Float, DateTime, 
-    Enum, ForeignKey, Index, Text
+    ForeignKey, Index, Text, UniqueConstraint
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from database.connection import Base
 from datetime import datetime
@@ -13,15 +14,8 @@ import enum
 
 
 # ════════════════════════════════════════════════════════════════════
-# ENUM TANIMLARI
+# ENUM TANIMLARI (Sadece MetricStatus kaldı)
 # ════════════════════════════════════════════════════════════════════
-
-class SentimentTypeDB(enum.Enum):
-    """Sentiment değerleri"""
-    POSITIVE = "positive"
-    NEGATIVE = "negative"
-    NEUTRAL = "neutral"
-
 
 class MetricStatusDB(enum.Enum):
     """Metrik durumu"""
@@ -35,12 +29,30 @@ class MetricStatusDB(enum.Enum):
 # ════════════════════════════════════════════════════════════════════
 
 class ModelVersionDB(Base):
-    """ML model versiyonları"""
+    """
+    ML model versiyonları
+    
+    Generic: Aynı versiyon farklı modeller için kullanılabilir.
+    Örnek: SentimentModel v1.0.0 ve SpamDetector v1.0.0
+    """
     __tablename__ = "model_versions"
     
     id = Column(Integer, primary_key=True, autoincrement=True)
-    version = Column(String(20), unique=True, nullable=False, index=True)
-    name = Column(String(100), default="DummySentimentAnalyzer")
+    
+    version = Column(
+        String(20), 
+        nullable=False, 
+        index=True,
+        comment="Semantic version (1.0.0)"
+    )
+    
+    name = Column(
+        String(100), 
+        nullable=False,
+        index=True,
+        comment="Model adı (SentimentModel, SpamDetector vb.)"
+    )
+    
     description = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     is_active = Column(Integer, default=1)
@@ -48,16 +60,27 @@ class ModelVersionDB(Base):
     # İlişki: Bu versiyona ait tahminler
     predictions = relationship("PredictionMetricDB", back_populates="model_version")
     
+    # Unique Constraint: (name, version) ikilisi benzersiz olmalı
+    __table_args__ = (
+        UniqueConstraint('name', 'version', name='uq_model_name_version'),
+    )
+    
     def __repr__(self):
-        return f"<ModelVersion(version='{self.version}', name='{self.name}')>"
+        return f"<ModelVersion(name='{self.name}', version='{self.version}')>"
 
 
 # ════════════════════════════════════════════════════════════════════
-# PREDICTION METRICS TABLOSU
+# PREDICTION METRICS TABLOSU (Generic)
 # ════════════════════════════════════════════════════════════════════
 
 class PredictionMetricDB(Base):
-    """Tahmin metrikleri"""
+    """
+    Tahmin metrikleri - Generic AI Platform
+    
+    Hibrit Yaklaşım:
+    - prediction_label (String): Hızlı sorgulama için (INDEX)
+    - metrics_data (JSONB): Esnek veri saklama için (raw output)
+    """
     __tablename__ = "prediction_metrics"
     
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -78,11 +101,34 @@ class PredictionMetricDB(Base):
         index=True
     )
     
-    sentiment = Column(
-        Enum(SentimentTypeDB), 
-        nullable=False,
-        comment="positive, negative, neutral"
+    # ════════════════════════════════════════════════════════════════
+    # GENERIC FIELDS
+    # ════════════════════════════════════════════════════════════════
+    
+    prediction_label = Column(
+        String(100), 
+        nullable=False, 
+        index=True,
+        comment="Standartlaştırılmış etiket (Positive, Spam, TR vb.)"
     )
+    
+    metrics_data = Column(
+        JSONB, 
+        nullable=True,
+        comment="Model raw output: {logits, probabilities, raw_score}"
+    )
+    
+    task_type = Column(
+        String(50), 
+        nullable=False,
+        default="classification",
+        index=True,
+        comment="Model tipi: classification, regression, embedding"
+    )
+    
+    # ════════════════════════════════════════════════════════════════
+    # PERFORMANCE METRICS
+    # ════════════════════════════════════════════════════════════════
     
     confidence = Column(
         Float, 
@@ -112,14 +158,15 @@ class PredictionMetricDB(Base):
     # İlişki
     model_version = relationship("ModelVersionDB", back_populates="predictions")
     
-    # Composite Index
+    # Composite Indexes (Performans optimizasyonu)
     __table_args__ = (
-        Index("ix_metrics_timestamp_sentiment", "timestamp", "sentiment"),
+        Index("ix_metrics_label_timestamp", "prediction_label", "timestamp"),
+        Index("ix_metrics_task_type", "task_type"),
         Index("ix_metrics_confidence", "confidence"),
     )
     
     def __repr__(self):
-        return f"<PredictionMetric(id='{self.prediction_id}', sentiment='{self.sentiment.value}')>"
+        return f"<PredictionMetric(id='{self.prediction_id}', label='{self.prediction_label}')>"
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -162,20 +209,27 @@ class RateLimitEntryDB(Base):
 
 
 # ════════════════════════════════════════════════════════════════════
-# METRIC THRESHOLDS TABLOSU
+# METRIC THRESHOLDS TABLOSU (Model Bazlı)
 # ════════════════════════════════════════════════════════════════════
 
 class MetricThresholdsDB(Base):
-    """Metrik eşik değerleri konfigürasyonu"""
+    """
+    Metrik eşik değerleri konfigürasyonu - Model Bazlı
+    
+    Her model için farklı eşikler tanımlanabilir:
+    - SentimentModel: min_confidence_warning = 0.6
+    - MedicalDiagnosis: min_confidence_warning = 0.95
+    """
     __tablename__ = "metric_thresholds"
     
     id = Column(Integer, primary_key=True, autoincrement=True)
     
-    name = Column(
-        String(50), 
+    model_name = Column(
+        String(100), 
         unique=True, 
+        nullable=False,
         default="default",
-        comment="Konfigürasyon profili adı"
+        comment="Model adı (her model için ayrı eşikler)"
     )
     
     # Güven skoru eşikleri
@@ -191,4 +245,4 @@ class MetricThresholdsDB(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     
     def __repr__(self):
-        return f"<MetricThresholds(name='{self.name}')>"
+        return f"<MetricThresholds(model_name='{self.model_name}')>"
