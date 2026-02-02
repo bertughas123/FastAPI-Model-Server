@@ -30,7 +30,7 @@ class MetricStatusDB(enum.Enum):
 
 class ModelVersionDB(Base):
     """
-    ML model versiyonları
+    ML model adı ve versiyonları
     
     Generic: Aynı versiyon farklı modeller için kullanılabilir.
     Örnek: SentimentModel v1.0.0 ve SpamDetector v1.0.0
