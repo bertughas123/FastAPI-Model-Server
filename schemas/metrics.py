@@ -1,22 +1,16 @@
 """
 ML Model Performans Metrikleri İçin Pydantic Şemaları
+Generic AI Platform - Her model tipini destekler
 """
 from pydantic import BaseModel, Field, field_validator
-from typing import Optional, Dict
+from typing import Optional, Dict, Any
 from datetime import datetime
 from enum import Enum
 
 
 # ============================================================================
-# ENUM TANIMLARI (Sabit değerler)
+# ENUM TANIMLARI (Sadece MetricStatus kaldı)
 # ============================================================================
-
-class SentimentType(str, Enum):
-    """İzin verilen sentiment değerleri"""
-    POSITIVE = "positive"
-    NEGATIVE = "negative"
-    NEUTRAL = "neutral"
-
 
 class MetricStatus(str, Enum):
     """Metrik durumu"""
@@ -26,35 +20,59 @@ class MetricStatus(str, Enum):
 
 
 # ============================================================================
-# METRİK MODELLERİ
+# METRİK MODELLERİ (Generic)
 # ============================================================================
 
 class PredictionMetric(BaseModel):
-    """Tek bir tahmin için metrikler"""
+    """Tek bir tahmin için metrikler (Generic)"""
     
     prediction_id: str = Field(
-        description="Benzersiz tahmin tanımlayıcısı (UUID gibi)"
+        description="Benzersiz tahmin tanımlayıcısı (UUID)"
     )
     
-    sentiment: SentimentType = Field(
-        description="Tahmin edilen sentiment"
+    # ════════════════════════════════════════════════════════════════
+    # GENERIC FIELDS
+    # ════════════════════════════════════════════════════════════════
+    
+    prediction_label: Optional[str] = Field(
+        default=None,
+        description="Standartlaştırılmış etiket (Positive, Spam, TR vb.)"
     )
+    
+    metrics_data: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Model raw output (logits, probabilities, scores)"
+    )
+    
+    task_type: str = Field(
+        default="classification",
+        description="Model tipi: classification, regression, embedding"
+    )
+    
+    model_name: Optional[str] = Field(
+        default=None,
+        description="Model adı (SentimentModel, SpamDetector vb.)"
+    )
+    
+    # ════════════════════════════════════════════════════════════════
+    # PERFORMANCE METRICS
+    # ════════════════════════════════════════════════════════════════
     
     confidence: float = Field(
-        ge=0.0,  # greater than or equal (>=)
-        le=1.0,  # less than or equal (<=)
+        ge=0.0,
+        le=1.0,
         description="Güven skoru (0-1 arası)"
     )
     
     inference_time_ms: float = Field(
-        gt=0,  # greater than (>)
+        gt=0,
         description="Model çıkarım süresi (milisaniye)",
         examples=[45.2, 123.5]
     )
     
     input_length: int = Field(
         ge=1,
-        le=1000,
+        le=10000,
         description="Girdi metninin karakter uzunluğu"
     )
     
@@ -68,18 +86,31 @@ class PredictionMetric(BaseModel):
         examples=["1.0.0", "2.1.3"]
     )
     
+    @field_validator('prediction_label')
+    @classmethod
+    def validate_label(cls, v: Optional[str]) -> Optional[str]:
+        """Etiket validasyonu: boşluk ve uzunluk kontrolü"""
+        if v is None:
+            return v
+        
+        # Boşluk kontrolü
+        if not v.strip():
+            raise ValueError('Label cannot be empty or whitespace')
+        
+        # Uzunluk kontrolü
+        if len(v) > 100:
+            raise ValueError('Label too long (max 100 chars)')
+        
+        return v.strip()
+    
     @field_validator('model_version')
     @classmethod
     def validate_version_format(cls, v: str) -> str:
-        """
-        Model versiyonunun semantic versioning formatında olduğunu kontrol et
-        Örnek: 1.0.0, 2.3.1
-        """
+        """Model versiyonunun semantic versioning formatında olduğunu kontrol et"""
         parts = v.split('.')
         if len(parts) != 3:
             raise ValueError('Model version must be in format: X.Y.Z')
         
-        # Her parçanın sayı olduğunu kontrol et
         for part in parts:
             if not part.isdigit():
                 raise ValueError(f'Invalid version part: {part}')
@@ -90,18 +121,24 @@ class PredictionMetric(BaseModel):
         json_schema_extra = {
             "example": {
                 "prediction_id": "550e8400-e29b-41d4-a716-446655440000",
-                "sentiment": "positive",
+                "prediction_label": "Positive",
+                "task_type": "classification",
+                "model_name": "SentimentModel",
                 "confidence": 0.87,
                 "inference_time_ms": 45.2,
                 "input_length": 32,
                 "timestamp": "2024-01-10T10:30:00Z",
-                "model_version": "1.0.0"
+                "model_version": "1.0.0",
+                "metrics_data": {
+                    "logits": [0.87, 0.08, 0.05],
+                    "labels": ["Positive", "Negative", "Neutral"]
+                }
             }
         }
 
 
 class AggregatedMetrics(BaseModel):
-    """Toplanan metrikler (belirli bir zaman aralığı için)"""
+    """Toplanan metrikler (Generic) - Belirli bir zaman aralığı için"""
     
     total_predictions: int = Field(
         ge=0,
@@ -115,33 +152,49 @@ class AggregatedMetrics(BaseModel):
     )
     
     average_inference_time_ms: float = Field(
-        gt=0,
+        ge=0,
         description="Ortalama çıkarım süresi"
     )
     
     min_inference_time_ms: float = Field(
-        gt=0,
+        ge=0,
         description="En düşük çıkarım süresi"
     )
     
     max_inference_time_ms: float = Field(
-        gt=0,
+        ge=0,
         description="En yüksek çıkarım süresi"
     )
     
     p95_inference_time_ms: Optional[float] = Field(
         None,
-        gt=0,
+        ge=0,
         description="95. persentil çıkarım süresi (isteklerin %95'i bu sürenin altında)"
     )
     
-    sentiment_distribution: Dict[SentimentType, int] = Field(
-        description="Sentiment dağılımı",
-        examples=[{
-            "positive": 45,
-            "negative": 20,
-            "neutral": 35
-        }]
+    # ════════════════════════════════════════════════════════════════
+    # GENERIC LABEL DISTRIBUTION
+    # ════════════════════════════════════════════════════════════════
+    
+    label_distribution: Dict[str, int] = Field(
+        default_factory=dict,
+        description="Etiket dağılımı (dinamik key'ler)",
+        examples=[
+            {"Positive": 45, "Negative": 20, "Neutral": 35},
+            {"Spam": 12, "Ham": 88},
+            {"TR": 70, "EN": 25, "DE": 5}
+        ]
+    )
+    
+    # Filtre bilgileri
+    task_type: Optional[str] = Field(
+        default=None,
+        description="Filtrelenen task tipi"
+    )
+    
+    model_name: Optional[str] = Field(
+        default=None,
+        description="Filtrelenen model adı"
     )
     
     status: MetricStatus = Field(
@@ -157,13 +210,13 @@ class AggregatedMetrics(BaseModel):
         description="Metrik toplama bitiş zamanı"
     )
     
-    @field_validator('sentiment_distribution')
+    @field_validator('label_distribution')
     @classmethod
-    def validate_distribution_sum(cls, v: dict) -> dict:
+    def validate_distribution(cls, v: dict) -> dict:
         """Dağılımdaki değerlerin negatif olmamasını kontrol et"""
-        for sentiment, count in v.items():
+        for label, count in v.items():
             if count < 0:
-                raise ValueError(f'Sentiment count cannot be negative: {sentiment}={count}')
+                raise ValueError(f'Label count cannot be negative: {label}={count}')
         return v
     
     class Config:
@@ -175,11 +228,13 @@ class AggregatedMetrics(BaseModel):
                 "min_inference_time_ms": 23.1,
                 "max_inference_time_ms": 234.2,
                 "p95_inference_time_ms": 156.3,
-                "sentiment_distribution": {
-                    "positive": 45,
-                    "negative": 20,
-                    "neutral": 35
+                "label_distribution": {
+                    "Positive": 45,
+                    "Negative": 20,
+                    "Neutral": 35
                 },
+                "task_type": "classification",
+                "model_name": "SentimentModel",
                 "status": "normal",
                 "time_window_start": "2024-01-10T10:00:00Z",
                 "time_window_end": "2024-01-10T11:00:00Z"
@@ -220,7 +275,6 @@ class MetricThresholds(BaseModel):
     @classmethod
     def critical_must_be_lower_than_warning(cls, v: float, info) -> float:
         """Kritik eşik, uyarı eşiğinden küçük olmalı"""
-        # Pydantic v2'de `values` yerine `info.data` kullanılır
         if 'min_confidence_warning' in info.data:
             warning = info.data['min_confidence_warning']
             if v >= warning:
@@ -241,7 +295,7 @@ class MetricThresholds(BaseModel):
 
 
 # ============================================================================
-# GEMİNİ ANALİZ ŞEMALARı (Aşama 3)
+# GEMİNİ ANALİZ ŞEMALARı
 # ============================================================================
 
 class PerformanceIssue(BaseModel):
